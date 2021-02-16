@@ -32,7 +32,7 @@ def depth_to_point_cloud(depth_image: np.ndarray,
 
     rows, cols = depth_image.shape
     c, r = np.meshgrid(np.arange(cols), np.arange(rows), sparse=True)
-    z = depth_image
-    x = z * (c - camera_parameters['principal_point'][0]) / camera_parameters['focal_length']
+    z = -depth_image
+    x = -z * (c - camera_parameters['principal_point'][0]) / camera_parameters['focal_length']
     y = z * (r - camera_parameters['principal_point'][1]) / camera_parameters['focal_length']
     return np.dstack((x, y, z))

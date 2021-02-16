@@ -19,8 +19,6 @@ class ToPointCloud(object):
         # Extract depth image and joints from sample
         (depth_image, joints) = sample
         point_cloud = depth_to_point_cloud(depth_image, self.camera_parameters)
-        # Adjust joints coordinates to match point cloud
-        joints = {joint: (coords[0], -coords[1], -coords[2]) for joint, coords in joints.items()}
         # Re-build tuple and return it
         return point_cloud, joints
 
