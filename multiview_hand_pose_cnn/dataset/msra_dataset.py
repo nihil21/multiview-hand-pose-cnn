@@ -1,13 +1,15 @@
 import os
 import glob
 import numpy as np
+import cv2
 import torch
 from torch.utils.data import Dataset
 from typing import Dict, Union, Tuple, Optional, List, Callable, Any
-from multiview_hand_pose_cnn.dataset.data_utils import read_bin_to_depth, depth_to_point_cloud
+from multiview_hand_pose_cnn.dataset.data_utils import (read_bin_to_depth, depth_to_point_cloud,
+                                                        align_point_cloud, project_to_obb_planes)
 
 
-class ToPointCloud(object):
+class ToPointCloud:
     """Transform that, given camera's parameters (principal point and focal length),
     turns a depth image into a point cloud."""
 
@@ -15,24 +17,57 @@ class ToPointCloud(object):
         self.camera_parameters = camera_parameters
 
     def __call__(self, sample: Tuple[np.ndarray, Dict[str, Tuple[float, float, float]]]) \
-            -> Tuple[np.ndarray, Dict[str, Tuple[float, float, float]]]:
+            -> (np.ndarray, Dict[str, Tuple[float, float, float]]):
         # Extract depth image and joints from sample
         (depth_image, joints) = sample
         point_cloud = depth_to_point_cloud(depth_image, self.camera_parameters)
+        joints = {j: (coords[0], coords[1], -coords[2]) for j, coords in joints.items()}
         # Re-build tuple and return it
         return point_cloud, joints
+
+
+class AlignPointCloud:
+    """Transform that aligns a point cloud to its principal components."""
+    def __call__(self, sample: Tuple[np.ndarray, Dict[str, Tuple[float, float, float]]]) \
+            -> (np.ndarray, Dict[str, Tuple[float, float, float]], np.ndarray):
+        # Extract point cloud and joints from sample
+        (point_cloud, joints) = sample
+        point_cloud, obb, joints = align_point_cloud(point_cloud, joints)
+        # Re-build tuple and return it
+        return point_cloud, joints, obb
+
+
+class ProjectToOBBPlanes:
+    """Transform that projects the point cloud onto the three OBB planes."""
+    def __call__(self, sample: Tuple[np.ndarray, Dict[str, Tuple[float, float, float]], np.ndarray]) \
+            -> (np.ndarray, Dict[str, Tuple[float, float, float]]):
+        # Extract point cloud, joints from sample
+        (point_cloud, joints, obb) = sample
+        projections = project_to_obb_planes(point_cloud, obb[-1])
+
+        # Refine with morph operations and median filter
+        def refine(projection: np.ndarray):
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            projection = cv2.morphologyEx(projection, cv2.MORPH_OPEN, kernel)
+            projection = cv2.medianBlur(projection, 5)
+            return projection
+
+        projections = [refine(p) for p in projections]
+        # Re-build tuple and return it
+        return projections, joints
 
 
 class ToTensor(object):
     """Transform that turns a NumPy's array sample into a PyTorch's tensor."""
 
     def __call__(self, sample: Tuple[np.ndarray, Dict[str, Tuple[float, float, float]]]) \
-            -> Tuple[torch.Tensor, Dict[str, Tuple[float, float, float]]]:
-        # Extract data and joints from sample
-        (data, joints) = sample
-        data = torch.from_numpy(data)
+            -> (torch.Tensor, torch.Tensor):
+        # Extract point cloud and joints from sample
+        (point_cloud, joints) = sample
+        point_cloud = torch.from_numpy(point_cloud)
+        joints = torch.tensor([c for c in joints.values()], dtype=torch.float64)
         # Re-build tuple and return it
-        return data, joints
+        return point_cloud, joints
 
 
 class MSRADataset(Dataset):
@@ -86,6 +121,7 @@ class MSRADataset(Dataset):
 
     def __getitem__(self, item) -> Tuple[np.ndarray, Dict[str, Tuple[float, float, float]]]:
         (bin_file, joints) = self.samples[item]
+        # Open and read the binary file to produce the actual depth image
         sample = (read_bin_to_depth(bin_file), joints)
         if self.transforms:
             for transform in self.transforms:
