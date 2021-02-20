@@ -52,7 +52,7 @@ class ProjectToOBBPlanes:
             projection = cv2.medianBlur(projection, 5)
             return projection
 
-        projections = [refine(p) for p in projections]
+        projections = np.array([refine(p) for p in projections])
         # Re-build tuple and return it
         return projections, joints
 
@@ -62,12 +62,12 @@ class ToTensor(object):
 
     def __call__(self, sample: Tuple[np.ndarray, Dict[str, Tuple[float, float, float]]]) \
             -> (torch.Tensor, torch.Tensor):
-        # Extract point cloud and joints from sample
-        (point_cloud, joints) = sample
-        point_cloud = torch.from_numpy(point_cloud)
+        # Extract projections and joints from sample
+        (projections, joints) = sample
+        projections = torch.from_numpy(projections)
         joints = torch.tensor([c for c in joints.values()], dtype=torch.float64)
         # Re-build tuple and return it
-        return point_cloud, joints
+        return projections, joints
 
 
 class MSRADataset(Dataset):
