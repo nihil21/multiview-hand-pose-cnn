@@ -1,24 +1,18 @@
 import torch
 import torch.nn as nn
-
-
-class LocalContrastNormalization(nn.Module):
-    def __init__(self):
-        super(LocalContrastNormalization, self).__init__()
-        raise NotImplementedError('TODO')
-
-    def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
-        pass
+from multiview_hand_pose_cnn.nn.local_contrast_normalization import LocalContrastNormalization as LCN
 
 
 class MultiViewHandPoseCNNBranch(nn.Module):
     def __init__(self):
         super(MultiViewHandPoseCNNBranch, self).__init__()
-        self.lcn = LocalContrastNormalization()
+        self.lcn = LCN()
         raise NotImplementedError('TODO')
 
-    def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
-        pass
+    def forward(self, x: torch.FloatTensor) -> torch.Tensor:
+        # Apply Local Contrast Normalization
+        x = self.lcn(x)
+        return x
 
 
 class MultiViewHandPoseCNN(nn.Module):

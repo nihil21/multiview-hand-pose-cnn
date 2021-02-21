@@ -37,7 +37,7 @@ def depth_to_point_cloud(depth_image: np.ndarray,
     c, r = np.meshgrid(np.arange(cols), np.arange(rows), sparse=True)
     z = depth_image
     x = z * (c - camera_parameters['principal_point'][0]) / camera_parameters['focal_length'][0]
-    y = -z * (r - camera_parameters['principal_point'][1]) / camera_parameters['focal_length'][1]  # invert sign of y
+    y = z * (r - camera_parameters['principal_point'][1]) / camera_parameters['focal_length'][1]
     # Stack x, y and z
     point_cloud = np.dstack((x, y, z))
     # Remove points in (0, 0, 0)
