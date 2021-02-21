@@ -76,7 +76,7 @@ class ProjectToOBBPlanes:
                                                 borderType=cv2.BORDER_CONSTANT, value=1.)
             return projection
 
-        projections = [resize_and_pad(p) for p in projections]
+        projections = np.array([resize_and_pad(p) for p in projections])
 
         # Re-build tuple and return it
         return projections, joints

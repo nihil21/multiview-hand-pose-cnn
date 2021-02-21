@@ -1,37 +1,82 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from multiview_hand_pose_cnn.nn.local_contrast_normalization import LocalContrastNormalization as LCN
 
 
 class MultiViewHandPoseCNNBranch(nn.Module):
     def __init__(self):
         super(MultiViewHandPoseCNNBranch, self).__init__()
+        # Linear contrast normalization layer
         self.lcn = LCN()
-        raise NotImplementedError('TODO')
+        # Two-staged CNN branches, one for each resolution
+        self.fine_branch = nn.Sequential(
+            nn.Conv2d(in_channels=1, out_channels=16, kernel_size=5),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=4),
+            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=6),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2)
+        )
+        self.middle_branch = nn.Sequential(
+            nn.Conv2d(in_channels=1, out_channels=16, kernel_size=5),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2),
+            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=5),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2)
+        )
+        self.coarse_branch = nn.Sequential(
+            nn.Conv2d(in_channels=1, out_channels=16, kernel_size=4),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2)
+        )
+        # Final linear layers
+        self.fc = nn.Sequential(
+            nn.Linear(in_features=7776, out_features=6804),
+            nn.ReLU(),
+            nn.Linear(in_features=6804, out_features=6804)
+        )
 
     def forward(self, x: torch.FloatTensor) -> torch.Tensor:
         # Apply Local Contrast Normalization
         x = self.lcn(x)
-        return x
+        # Downsample to 24x24 and 48x48
+        x_fine = x  # finer scale is 96x96, as the original
+        x_middle = F.interpolate(x, size=48)
+        x_coarse = F.interpolate(x, size=24)
+        # Process each image separately
+        x_fine = self.fine_branch(x_fine)
+        x_middle = self.middle_branch(x_middle)
+        x_coarse = self.coarse_branch(x_coarse)
+        # Concatenate output feature maps
+        x = torch.cat([x_fine, x_middle, x_coarse], 1)
+        # Flatten tensor
+        x = x.view(x.shape[0], -1)
+        # Apply linear layers
+        x = self.fc(x)
+        # Final reshape into (batch_size, 21, 18, 18)
+        return x.reshape(x.shape[0], 21, 18, 18)
 
 
 class MultiViewHandPoseCNN(nn.Module):
     def __init__(self):
         super(MultiViewHandPoseCNN, self).__init__()
         self.xy_branch = MultiViewHandPoseCNNBranch()
-        self.xz_branch = MultiViewHandPoseCNNBranch()
         self.yz_branch = MultiViewHandPoseCNNBranch()
-        raise NotImplementedError('TODO')
+        self.zx_branch = MultiViewHandPoseCNNBranch()
 
     def forward(self, projections: torch.FloatTensor) -> torch.FloatTensor:
         # Input tensor represents a batch of point clouds' projections
         # with shape [batch_size, rows, cols, 3]
         # Take the three projections
-        xy_proj = projections[:, :, :, 0].unsqueeze(dim=-1)
-        yz_proj = projections[:, :, :, 1].unsqueeze(dim=-1)
-        zx_proj = projections[:, :, :, 2].unsqueeze(dim=-1)
+        xy_proj = projections[:, 0, :, :].unsqueeze(1)
+        yz_proj = projections[:, 1, :, :].unsqueeze(1)
+        zx_proj = projections[:, 2, :, :].unsqueeze(1)
         # Feed the projections to the three branches
         xy_heatmap = self.xy_branch(xy_proj)
         yz_heatmap = self.yz_branch(yz_proj)
-        zx_heatmap = self.xz_branch(zx_proj)
+        zx_heatmap = self.zx_branch(zx_proj)
         return xy_heatmap
