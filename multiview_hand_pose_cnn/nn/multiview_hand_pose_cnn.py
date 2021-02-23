@@ -85,7 +85,7 @@ class MultiViewHandPoseCNN(nn.Module):
     def inference(self, projections: torch.FloatTensor) -> (torch.FloatTensor, torch.FloatTensor, torch.FloatTensor):
         # Input tensor represents a single point clouds' projections
         # with shape [1, 3, 96, 96]
-        with torch.no_grad:
+        with torch.no_grad():
             # Take the three projections
             xy_proj = projections[:, 0, :, :].unsqueeze(1)
             yz_proj = projections[:, 1, :, :].unsqueeze(1)
