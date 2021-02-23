@@ -25,13 +25,13 @@ class MSRADataset(Dataset):
                       'little_pip', 'little_dip', 'little_tip', 'thumb_mcp', 'thumb_pip', 'thumb_dip', 'thumb_tip']
 
         # Read the subjects folders
-        subjects = glob.glob(os.path.join(root_folder, 'P*'))
+        subjects = sorted(glob.glob(os.path.join(root_folder, 'P*')))
         # For each subject, read the hand poses folders
         for subject in subjects:
-            hand_poses = glob.glob(os.path.join(subject, '*', ''))
+            hand_poses = sorted(glob.glob(os.path.join(subject, '*', '')))
             # For each hand pose, save the path to each binary file
             for hand_pose in hand_poses:
-                bin_files = glob.glob(os.path.join(hand_pose, '*.bin'))
+                bin_files = sorted(glob.glob(os.path.join(hand_pose, '*.bin')))
                 # List of dictionaries joint <-> 3D coordinates
                 joints = []
                 # Parse joint.txt file and save 3D coordinates of joints

@@ -41,6 +41,7 @@ class MultiViewHandPoseCNNBranch(nn.Module):
         )
 
     def forward(self, x: torch.FloatTensor) -> torch.Tensor:
+        batch_size = x.shape[0]
         # Apply Local Contrast Normalization
         x = self.lcn(x)
         # Downsample to 24x24 and 48x48
@@ -54,11 +55,11 @@ class MultiViewHandPoseCNNBranch(nn.Module):
         # Concatenate output feature maps
         x = torch.cat([x_fine, x_middle, x_coarse], 1)
         # Flatten tensor
-        x = x.view(x.shape[0], -1)
+        x = x.view(batch_size, -1)
         # Apply linear layers
         x = self.fc(x)
         # Final reshape into (batch_size, 21, 18, 18)
-        return x.reshape(x.shape[0], 21, 18, 18)
+        return x.reshape(batch_size, 21, 18, 18)
 
 
 class MultiViewHandPoseCNN(nn.Module):
@@ -68,9 +69,9 @@ class MultiViewHandPoseCNN(nn.Module):
         self.yz_branch = MultiViewHandPoseCNNBranch()
         self.zx_branch = MultiViewHandPoseCNNBranch()
 
-    def forward(self, projections: torch.FloatTensor) -> torch.FloatTensor:
+    def forward(self, projections: torch.FloatTensor) -> (torch.FloatTensor, torch.FloatTensor, torch.FloatTensor):
         # Input tensor represents a batch of point clouds' projections
-        # with shape [batch_size, rows, cols, 3]
+        # with shape [batch_size, 3, 96, 96]
         # Take the three projections
         xy_proj = projections[:, 0, :, :].unsqueeze(1)
         yz_proj = projections[:, 1, :, :].unsqueeze(1)
@@ -79,4 +80,18 @@ class MultiViewHandPoseCNN(nn.Module):
         xy_heatmap = self.xy_branch(xy_proj)
         yz_heatmap = self.yz_branch(yz_proj)
         zx_heatmap = self.zx_branch(zx_proj)
-        return xy_heatmap
+        return xy_heatmap, yz_heatmap, zx_heatmap
+
+    def inference(self, projections: torch.FloatTensor) -> (torch.FloatTensor, torch.FloatTensor, torch.FloatTensor):
+        # Input tensor represents a single point clouds' projections
+        # with shape [1, 3, 96, 96]
+        with torch.no_grad:
+            # Take the three projections
+            xy_proj = projections[:, 0, :, :].unsqueeze(1)
+            yz_proj = projections[:, 1, :, :].unsqueeze(1)
+            zx_proj = projections[:, 2, :, :].unsqueeze(1)
+            # Feed the projections to the three branches
+            xy_heatmap = self.xy_branch(xy_proj)
+            yz_heatmap = self.yz_branch(yz_proj)
+            zx_heatmap = self.zx_branch(zx_proj)
+        return xy_heatmap, yz_heatmap, zx_heatmap
