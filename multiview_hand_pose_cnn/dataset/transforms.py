@@ -1,7 +1,6 @@
 import cv2
 import torch
 import numpy as np
-import imutils
 from typing import Dict, Union, Tuple
 from multiview_hand_pose_cnn.dataset.data_utils import (depth_to_point_cloud, align_point_cloud,
                                                         project_to_obb_planes, generate_heatmaps)
@@ -18,8 +17,7 @@ class ToPointCloud:
             -> (np.ndarray, Dict[str, Tuple[float, float, float]]):
         # Extract depth image and joints from sample
         (depth_image, joints) = sample
-        point_cloud = depth_to_point_cloud(depth_image, self.camera_parameters)
-        joints = {j: (coords[0], -coords[1], -coords[2]) for j, coords in joints.items()}
+        point_cloud = depth_to_point_cloud(depth_image, self.camera_parameters)  # transform depth image in point cloud
         # Re-build tuple and return it
         return point_cloud, joints
 
@@ -31,20 +29,19 @@ class AlignPointCloud:
             -> (np.ndarray, Dict[str, Tuple[float, float, float]], np.ndarray):
         # Extract point cloud and joints from sample
         (point_cloud, joints) = sample
-        point_cloud, obb, joints = align_point_cloud(point_cloud, joints)
+        point_cloud, obb, vertex_idx, joints = align_point_cloud(point_cloud, joints)
         # Re-build tuple and return it
-        return point_cloud, joints, obb
+        return point_cloud, joints, obb, vertex_idx
 
 
 class ProjectToOBBPlanes:
     """Transform that projects the point cloud onto the three OBB planes."""
 
-    def __call__(self, sample: Tuple[np.ndarray, Dict[str, Tuple[float, float, float]], np.ndarray]) \
+    def __call__(self, sample: Tuple[np.ndarray, Dict[str, Tuple[float, float, float]], np.ndarray, int]) \
             -> (np.ndarray, Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]):
-        # Extract point cloud, joints and obb from sample
-        (point_cloud, joints, obb) = sample
-        # Obtain the projections and the projection boundaries
-        projections, boundaries = project_to_obb_planes(point_cloud, obb[-1])
+        # Extract point cloud, joints, obb and vertex index from sample
+        (point_cloud, joints, obb, vertex_idx) = sample
+        projections, boundaries = project_to_obb_planes(point_cloud, obb[vertex_idx])
 
         # Refine with morph operations and median filter
         def refine(projection: np.ndarray):
@@ -53,10 +50,13 @@ class ProjectToOBBPlanes:
             projection = cv2.medianBlur(projection, 5)
             return projection
 
-        projections = np.array([refine(p) for p in projections])
+        # Refine, resize to 96x96 and convert to NumPy's array
+        projections = np.array(
+            [cv2.resize(refine(p), dsize=(96, 96)) for p in projections]
+        )
 
         # Project also joints coordinates and obtain heatmaps
-        joints = {j: generate_heatmaps(np.array(c).reshape(1, 3), boundaries) for j, c in joints.items()}
+        joints = {j: generate_heatmaps(np.array(c), boundaries) for j, c in joints.items()}
 
         # Re-build tuple and return it
         return projections, joints

@@ -1,7 +1,8 @@
 import struct
 import numpy as np
 import open3d as o3d
-from typing import Union, Dict, Tuple, Optional, List
+from math import floor
+from typing import Union, Dict, Tuple, Optional, List, Callable
 
 
 def read_bin_to_depth(filename: str) -> np.ndarray:
@@ -42,8 +43,8 @@ def depth_to_point_cloud(depth_image: np.ndarray,
 
     rows, cols = depth_image.shape
     c, r = np.meshgrid(np.arange(cols), np.arange(rows), sparse=True)
-    z = depth_image
-    x = z * (c - camera_parameters['principal_point'][0]) / camera_parameters['focal_length'][0]
+    z = -depth_image
+    x = -z * (c - camera_parameters['principal_point'][0]) / camera_parameters['focal_length'][0]
     y = z * (r - camera_parameters['principal_point'][1]) / camera_parameters['focal_length'][1]
     # Stack x, y and z
     point_cloud = np.dstack((x, y, z))
@@ -54,7 +55,7 @@ def depth_to_point_cloud(depth_image: np.ndarray,
 
 
 def align_point_cloud(point_cloud: np.ndarray, joints: Optional[Dict[str, Tuple[float, float, float]]] = None) \
-        -> (np.ndarray, np.ndarray, Dict[str, np.ndarray]):
+        -> (np.ndarray, np.ndarray, int, Dict[str, np.ndarray]):
     """Function that:
         - performs Principal Component Analysis (PCA) on a point cloud;
         - computes the Oriented Bounding Box (OBB) of the point cloud;
@@ -66,8 +67,9 @@ def align_point_cloud(point_cloud: np.ndarray, joints: Optional[Dict[str, Tuple[
                        of the joint.
 
         :returns the new coordinates of the point cloud relative to the centre of the OBB;
-        :returns the coordinates of the 8 OBB vertices;
-        :returns the joints dictionary with the updated coordinates"""
+        :returns the coordinates of the 8 OBB vertices w.r.t. the OBB reference system;
+        :returns the index of the OBB vertex common to the three projection planes;
+        :returns the joints dictionary with the updated coordinates."""
 
     # Create PointCloud object
     pcd = o3d.geometry.PointCloud()
@@ -76,9 +78,20 @@ def align_point_cloud(point_cloud: np.ndarray, joints: Optional[Dict[str, Tuple[
     obb = o3d.geometry.OrientedBoundingBox.create_from_points(points=pcd.points)  # it automatically performs PCA
     # Get OBB center and rotation matrix
     center = obb.get_center()
-    rot_mtx = np.linalg.inv(obb.R)
+    rot_mtx = -np.linalg.inv(obb.R)
+    # Get OBB vertices w.r.t. world reference system
+    world_vertices = np.asarray(obb.get_box_points())
+    # Find vertex common to front, side and up views (i.e. the one closer to 'vertex_dir' point
+    vertex_dir = np.array([[center[0] - point_cloud[:, 0].max(),
+                            center[1] - point_cloud[:, 1].max(),
+                            center[2] - point_cloud[:, 2].max()]])
+    vertex_idx = np.sum((vertex_dir - world_vertices)**2, axis=1).argmin()
+
+    # Roto-translate point cloud, vertex and OBB
     pcd.rotate(R=rot_mtx, center=center).translate(-center)
     obb.rotate(R=rot_mtx, center=center).translate(-center)
+
+    # Roto-translate joints
     if joints is not None:
         coords = np.array([c for c in joints.values()])
         jcd = o3d.geometry.PointCloud()
@@ -86,18 +99,9 @@ def align_point_cloud(point_cloud: np.ndarray, joints: Optional[Dict[str, Tuple[
         jcd.rotate(R=rot_mtx, center=center).translate(-center)
         coords = np.asarray(jcd.points)
         joints = {j: coords[i] for i, j in enumerate(joints.keys())}
+
     # Return new point cloud and coordinates of box points
-    return np.asarray(pcd.points), np.asarray(obb.get_box_points()), joints
-
-
-def find_nearest(val: float, arr: np.ndarray) -> int:
-    """Function that, given a scalar and an array, returns the index of the array element nearest to the value.
-        :param val: the float value to be searched;
-        :param arr: the NumPy's array where the value is searched.
-
-        :returns the index of the array element nearest to the value."""
-
-    return (np.abs(val - arr)).argmin()
+    return np.asarray(pcd.points), np.asarray(obb.get_box_points()), vertex_idx, joints
 
 
 def project_to_obb_planes(point_cloud: np.ndarray, vertex: np.ndarray) -> (List[np.ndarray], List[np.ndarray]):
@@ -113,20 +117,23 @@ def project_to_obb_planes(point_cloud: np.ndarray, vertex: np.ndarray) -> (List[
     # Create list of index configurations for each projection xy, yz, zx
     proj_conf = [(0, 1, 2), (1, 2, 0), (2, 0, 1)]
 
+    # Define lambda that, given a scalar and an array, returns the index of the array element nearest to the value.
+    find_nearest: Callable[[float, np.ndarray], int] = lambda val, arr: (np.abs(val - arr)).argmin()
+
     proj_grids = []
     boundaries = []
-    for (x_i, y_i, z_i) in proj_conf:
+    for (x_p, y_p, z_p) in proj_conf:
         # Set x_arr, y_arr, z_arr and plane according to current configuration
-        x_arr = point_cloud[:, x_i]
-        y_arr = point_cloud[:, y_i]
-        z_arr = point_cloud[:, z_i]
-        plane = vertex[z_i]
+        x_arr = point_cloud[:, x_p]
+        y_arr = point_cloud[:, y_p]
+        z_arr = point_cloud[:, z_p]
+        plane = vertex[z_p]
         # Compute distance from plane and normalize
         d_arr = np.abs(z_arr - plane)
         d_arr = (d_arr - d_arr.min()) / (d_arr.max() - d_arr.min())
         # Create linear spaces for x and y
-        x_space = np.linspace(x_arr.min(), x_arr.max(), 96)
-        y_space = np.linspace(y_arr.min(), y_arr.max(), 96)
+        x_space = np.linspace(x_arr.min(), x_arr.max(), floor(x_arr.max() - x_arr.min()))
+        y_space = np.linspace(y_arr.min(), y_arr.max(), floor(y_arr.max() - y_arr.min()))
         # Create projection pixel grid
         proj_grid = np.ones((len(x_space), len(y_space)), dtype=np.float32)
         # For each point in the cloud, find the best pixel coordinates
@@ -151,19 +158,20 @@ def generate_heatmaps(joints_coords: np.ndarray, boundaries: List[np.ndarray]) -
     # Create list of index configurations for each projection xy, yz, zx
     proj_conf = [(0, 1), (1, 2), (2, 0)]
 
-    proj_grids = []
-    for (x_i, y_i), (x_min, x_max, y_min, y_max) in zip(proj_conf, boundaries):
+    # Define lambda that convolves a Gaussian kernel onto a grid
+    gaussian: Callable[[np.ndarray, np.ndarray, float, float, Optional[float]], np.ndarray] = \
+        lambda c, r, mu_x, mu_y, sigma=7.5: np.exp(-((c - mu_x)**2 + (r - mu_y)**2) / (2 * sigma**2))
+
+    heatmaps = []
+    for (x_p, y_p), (x_min, x_max, y_min, y_max) in zip(proj_conf, boundaries):
         # Set x_arr, y_arr, z_arr and plane according to current configuration
-        x = joints_coords[:, x_i]
-        y = joints_coords[:, y_i]
+        x_j = joints_coords[x_p]
+        y_j = joints_coords[y_p]
         # Create linear spaces for x and y (resolution of 18)
         x_space = np.linspace(x_min, x_max, 18)
         y_space = np.linspace(y_min, y_max, 18)
-        # Create projection pixel grid
-        proj_grid = np.zeros((len(x_space), len(y_space)), dtype=np.float32)
-        # Find the best pixel coordinates for the joint coordinate
-        i = find_nearest(x, x_space)
-        j = find_nearest(y, y_space)
-        proj_grid[i, j] = 1
-        proj_grids.append(proj_grid)
-    return proj_grids
+        rows, cols = np.meshgrid(y_space, x_space)
+        # Convolve Gaussian kernel
+        heatmap = gaussian(cols, rows, x_j, y_j)
+        heatmaps.append(heatmap)
+    return heatmaps

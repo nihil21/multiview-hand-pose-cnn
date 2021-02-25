@@ -30,23 +30,23 @@ def train(model: MultiViewHandPoseCNN,
         data = tqdm(data, leave=False)
     for (batch_proj, batch_heats) in data:
         # Extract ground truth heat maps triplets: (batch_size, 21, 3, 18, 18) -> 3 * (batch_size, 21, 18, 18)
-        xy_true_heat = batch_heats[:, :, 0]
-        yz_true_heat = batch_heats[:, :, 1]
-        zx_true_heat = batch_heats[:, :, 2]
+        xy_true_heats = batch_heats[:, :, 0]
+        yz_true_heats = batch_heats[:, :, 1]
+        zx_true_heats = batch_heats[:, :, 2]
 
         # Move tensors to GPU
         batch_proj = batch_proj.to(device)
-        xy_true_heat = xy_true_heat.to(device)
-        yz_true_heat = yz_true_heat.to(device)
-        zx_true_heat = zx_true_heat.to(device)
+        xy_true_heats = xy_true_heats.to(device)
+        yz_true_heats = yz_true_heats.to(device)
+        zx_true_heats = zx_true_heats.to(device)
 
         # Make prediction
         optimizer.zero_grad()
-        xy_pred_heat, yz_pred_heat, zx_pred_heat = model(batch_proj)
+        xy_pred_heats, yz_pred_heats, zx_pred_heats = model(batch_proj)
         # Compute loss
-        xy_loss = sum([criterion(xy_pred_heat[:, i], xy_true_heat[:, i]) for i in range(21)])
-        yz_loss = sum([criterion(yz_pred_heat[:, i], yz_true_heat[:, i]) for i in range(21)])
-        zx_loss = sum([criterion(zx_pred_heat[:, i], zx_true_heat[:, i]) for i in range(21)])
+        xy_loss = sum([criterion(xy_pred_heats[:, i], xy_true_heats[:, i]) for i in range(21)])
+        yz_loss = sum([criterion(yz_pred_heats[:, i], yz_true_heats[:, i]) for i in range(21)])
+        zx_loss = sum([criterion(zx_pred_heats[:, i], zx_true_heats[:, i]) for i in range(21)])
         loss = xy_loss + yz_loss + zx_loss
         # Backpropagation
         loss.backward()
