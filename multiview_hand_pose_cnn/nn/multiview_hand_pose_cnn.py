@@ -1,16 +1,23 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from multiview_hand_pose_cnn.nn.local_contrast_normalization import LocalContrastNormalization as LCN
+from typing import Optional
 
 
 class MultiViewHandPoseCNNBranch(nn.Module):
-    def __init__(self):
+    def __init__(self, use_batch_norm: Optional[bool] = False):
         super(MultiViewHandPoseCNNBranch, self).__init__()
-        # Linear contrast normalization layer
-        self.lcn = LCN()
         # Two-staged CNN branches, one for each resolution
         self.fine_branch = nn.Sequential(
+            nn.Conv2d(in_channels=1, out_channels=16, kernel_size=5),
+            nn.BatchNorm2d(num_features=16),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=4),
+            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=6),
+            nn.BatchNorm2d(num_features=32),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2)
+        ) if use_batch_norm else nn.Sequential(
             nn.Conv2d(in_channels=1, out_channels=16, kernel_size=5),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=4),
@@ -20,6 +27,15 @@ class MultiViewHandPoseCNNBranch(nn.Module):
         )
         self.middle_branch = nn.Sequential(
             nn.Conv2d(in_channels=1, out_channels=16, kernel_size=5),
+            nn.BatchNorm2d(num_features=16),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2),
+            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=5),
+            nn.BatchNorm2d(num_features=32),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2)
+        ) if use_batch_norm else nn.Sequential(
+            nn.Conv2d(in_channels=1, out_channels=16, kernel_size=5),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2),
             nn.Conv2d(in_channels=16, out_channels=32, kernel_size=5),
@@ -27,6 +43,14 @@ class MultiViewHandPoseCNNBranch(nn.Module):
             nn.MaxPool2d(kernel_size=2)
         )
         self.coarse_branch = nn.Sequential(
+            nn.Conv2d(in_channels=1, out_channels=16, kernel_size=4),
+            nn.BatchNorm2d(num_features=16),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4),
+            nn.BatchNorm2d(num_features=32),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2)
+        ) if use_batch_norm else nn.Sequential(
             nn.Conv2d(in_channels=1, out_channels=16, kernel_size=4),
             nn.ReLU(),
             nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4),
@@ -42,8 +66,6 @@ class MultiViewHandPoseCNNBranch(nn.Module):
 
     def forward(self, x: torch.FloatTensor) -> torch.Tensor:
         batch_size = x.shape[0]
-        # Apply Local Contrast Normalization
-        x = self.lcn(x)
         # Downsample to 24x24 and 48x48
         x_fine = x  # finer scale is 96x96, as the original
         x_middle = F.interpolate(x, size=48)
@@ -63,11 +85,14 @@ class MultiViewHandPoseCNNBranch(nn.Module):
 
 
 class MultiViewHandPoseCNN(nn.Module):
-    def __init__(self):
+    def __init__(self,
+                 xy_branch: Optional[MultiViewHandPoseCNNBranch] = False,
+                 yz_branch: Optional[MultiViewHandPoseCNNBranch] = False,
+                 zx_branch: Optional[MultiViewHandPoseCNNBranch] = False):
         super(MultiViewHandPoseCNN, self).__init__()
-        self.xy_branch = MultiViewHandPoseCNNBranch()
-        self.yz_branch = MultiViewHandPoseCNNBranch()
-        self.zx_branch = MultiViewHandPoseCNNBranch()
+        self.xy_branch = xy_branch if xy_branch is not None else MultiViewHandPoseCNNBranch()
+        self.yz_branch = yz_branch if yz_branch is not None else MultiViewHandPoseCNNBranch()
+        self.zx_branch = zx_branch if zx_branch is not None else MultiViewHandPoseCNNBranch()
 
     def forward(self, projections: torch.FloatTensor) -> (torch.FloatTensor, torch.FloatTensor, torch.FloatTensor):
         # Input tensor represents a batch of point clouds' projections

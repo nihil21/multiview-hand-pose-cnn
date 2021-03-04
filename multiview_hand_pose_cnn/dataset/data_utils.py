@@ -1,7 +1,8 @@
+from sys import float_info
 import struct
+import cv2
 import numpy as np
-import open3d as o3d
-from math import floor
+from sklearn.decomposition import PCA
 from typing import Union, Dict, Tuple, Optional, List, Callable
 
 
@@ -23,7 +24,7 @@ def read_bin_to_depth(filename: str) -> np.ndarray:
         depths_roi = np.array(depths_roi).reshape(roi_shape)
     # The file contains only depth information about the ROI (where the hand is),
     # so an array with the original shape must be created
-    depth_image = np.ones(img_shape) * 0
+    depth_image = np.zeros(img_shape)
     # Change ROI according to values read from file
     depth_image[top_offset:bottom_offset, left_offset:right_offset] = depths_roi
     return depth_image
@@ -49,13 +50,13 @@ def depth_to_point_cloud(depth_image: np.ndarray,
     # Stack x, y and z
     point_cloud = np.dstack((x, y, z))
     # Remove points in (0, 0, 0)
-    point_cloud = point_cloud[(point_cloud != 0).all(axis=2)]  # it will flatten the first two dimensions
+    point_cloud = point_cloud[~np.all(point_cloud == 0, axis=2)]  # it will flatten the first two dimensions
 
     return point_cloud
 
 
 def align_point_cloud(point_cloud: np.ndarray, joints: Optional[Dict[str, Tuple[float, float, float]]] = None) \
-        -> (np.ndarray, np.ndarray, int, Dict[str, np.ndarray]):
+        -> (np.ndarray, np.ndarray, Optional[np.ndarray]):
     """Function that:
         - performs Principal Component Analysis (PCA) on a point cloud;
         - computes the Oriented Bounding Box (OBB) of the point cloud;
@@ -71,37 +72,35 @@ def align_point_cloud(point_cloud: np.ndarray, joints: Optional[Dict[str, Tuple[
         :returns the index of the OBB vertex common to the three projection planes;
         :returns the joints dictionary with the updated coordinates."""
 
-    # Create PointCloud object
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(point_cloud)
-    # Computed OBB from point cloud
-    obb = o3d.geometry.OrientedBoundingBox.create_from_points(points=pcd.points)  # it automatically performs PCA
-    # Get OBB center and rotation matrix
-    center = obb.get_center()
-    rot_mtx = -np.linalg.inv(obb.R)
-    # Get OBB vertices w.r.t. world reference system
-    world_vertices = np.asarray(obb.get_box_points())
-    # Find vertex common to front, side and up views (i.e. the one closer to 'vertex_dir' point
-    vertex_dir = np.array([[center[0] - point_cloud[:, 0].max(),
-                            center[1] - point_cloud[:, 1].max(),
-                            center[2] - point_cloud[:, 2].max()]])
-    vertex_idx = np.sum((vertex_dir - world_vertices)**2, axis=1).argmin()
-
-    # Roto-translate point cloud, vertex and OBB
-    pcd.rotate(R=rot_mtx, center=center).translate(-center)
-    obb.rotate(R=rot_mtx, center=center).translate(-center)
+    # Perform PCA and obtain rotation matrix
+    pca = PCA(n_components=3)
+    pca.fit(point_cloud)
+    rot_mtx = -pca.components_
+    # Get center of point cloud
+    center = point_cloud.mean(axis=0)
+    # Change reference system
+    point_cloud = (point_cloud - center).dot(rot_mtx)
+    # Find OBB
+    x_min, x_max = point_cloud[:, 0].min(), point_cloud[:, 0].max()
+    y_min, y_max = point_cloud[:, 1].min(), point_cloud[:, 1].max()
+    z_min, z_max = point_cloud[:, 2].min(), point_cloud[:, 2].max()
+    obb = np.array([[x_min, y_min, z_min],
+                    [x_min, y_min, z_max],
+                    [x_min, y_max, z_min],
+                    [x_min, y_max, z_max],
+                    [x_max, y_min, z_min],
+                    [x_max, y_min, z_max],
+                    [x_max, y_max, z_min],
+                    [x_max, y_max, z_max]])
 
     # Roto-translate joints
+    jc = None
     if joints is not None:
-        coords = np.array([c for c in joints.values()])
-        jcd = o3d.geometry.PointCloud()
-        jcd.points = o3d.utility.Vector3dVector(coords)
-        jcd.rotate(R=rot_mtx, center=center).translate(-center)
-        coords = np.asarray(jcd.points)
-        joints = {j: coords[i] for i, j in enumerate(joints.keys())}
+        jc = np.array([c for c in joints.values()])
+        jc = (jc - center).dot(rot_mtx)
 
     # Return new point cloud and coordinates of box points
-    return np.asarray(pcd.points), np.asarray(obb.get_box_points()), vertex_idx, joints
+    return point_cloud, obb, jc
 
 
 def project_to_obb_planes(point_cloud: np.ndarray, vertex: np.ndarray) -> (List[np.ndarray], List[np.ndarray]):
@@ -130,18 +129,21 @@ def project_to_obb_planes(point_cloud: np.ndarray, vertex: np.ndarray) -> (List[
         plane = vertex[z_p]
         # Compute distance from plane and normalize
         d_arr = np.abs(z_arr - plane)
-        d_arr = (d_arr - d_arr.min()) / (d_arr.max() - d_arr.min())
+        norm_factor = d_arr.max() - d_arr.min()
+        d_arr = (d_arr - d_arr.min()) / norm_factor if norm_factor != 0 else d_arr - d_arr.min()
+
         # Create linear spaces for x and y
-        x_space = np.linspace(x_arr.min(), x_arr.max(), floor(x_arr.max() - x_arr.min()))
-        y_space = np.linspace(y_arr.min(), y_arr.max(), floor(y_arr.max() - y_arr.min()))
+        x_space = np.arange(start=x_arr.min(), stop=x_arr.max() + 2, step=2)  # resolution of 2 mm
+        y_space = np.arange(start=y_arr.min(), stop=y_arr.max() + 2, step=2)  # resolution of 2 mm
         # Create projection pixel grid
-        proj_grid = np.ones((len(x_space), len(y_space)), dtype=np.float32)
+        proj_grid = np.ones((len(x_space), len(y_space)))
         # For each point in the cloud, find the best pixel coordinates
         for x, y, d in zip(x_arr, y_arr, d_arr):
             i = find_nearest(x, x_space)
             j = find_nearest(y, y_space)
-            if d < proj_grid[i, j]:
-                proj_grid[i, j] = d
+            proj_grid[i, j] = min(d, proj_grid[i, j])
+        # Normalize
+        proj_grid = cv2.normalize(proj_grid, dst=None, alpha=0., beta=1., norm_type=cv2.NORM_MINMAX)
         proj_grids.append(proj_grid)
         boundaries.append((x_arr.min(), x_arr.max(), y_arr.min(), y_arr.max()))
     return proj_grids, boundaries
@@ -159,8 +161,11 @@ def generate_heatmaps(joints_coords: np.ndarray, boundaries: List[np.ndarray]) -
     proj_conf = [(0, 1), (1, 2), (2, 0)]
 
     # Define lambda that convolves a Gaussian kernel onto a grid
-    gaussian: Callable[[np.ndarray, np.ndarray, float, float, Optional[float]], np.ndarray] = \
-        lambda c, r, mu_x, mu_y, sigma=7.5: np.exp(-((c - mu_x)**2 + (r - mu_y)**2) / (2 * sigma**2))
+    def gaussian(c: np.ndarray, r: np.ndarray, mu_x: float, mu_y: float, sigma: Optional[float] = 5):
+        log_res = -((c - mu_x)**2 + (r - mu_y)**2) / (2 * sigma**2)
+        # Clip to avoid underflow and overflow
+        log_res = np.clip(log_res, a_min=np.log(float_info.min), a_max=np.log(float_info.max))
+        return np.exp(log_res)
 
     heatmaps = []
     for (x_p, y_p), (x_min, x_max, y_min, y_max) in zip(proj_conf, boundaries):
@@ -175,3 +180,23 @@ def generate_heatmaps(joints_coords: np.ndarray, boundaries: List[np.ndarray]) -
         heatmap = gaussian(cols, rows, x_j, y_j)
         heatmaps.append(heatmap)
     return heatmaps
+
+
+def local_contrast_normalization(x: np.ndarray, kernel: int, sigma: float) -> np.ndarray:
+    """Function that applies Local Contrast Normalization on a given image.
+        :param x: input image as a NumPy's array;
+        :param kernel: size of the LCN kernel;
+        :param sigma: standard deviation of the LCN.
+
+        :returns the normalized image."""
+
+    # Apply subtractive normalization
+    v = cv2.GaussianBlur(x, (kernel, kernel), sigma)
+    num = x - v
+    # Apply divisive normalization
+    sigma = cv2.GaussianBlur(num**2, (kernel, kernel), sigma)
+    c = sigma.mean()
+    den = np.maximum(sigma, c)
+    # Normalize image
+    x = num / den
+    return cv2.normalize(x, dst=None, alpha=0., beta=1., norm_type=cv2.NORM_MINMAX)
