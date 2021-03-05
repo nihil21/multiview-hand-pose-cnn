@@ -2,14 +2,14 @@ import os
 import glob
 from pathlib import Path
 import cv2
-import imutils
 import torch
 import numpy as np
 from tqdm.notebook import tqdm
 from typing import Dict, Union, Tuple, Optional
-from multiview_hand_pose_cnn.dataset.data_utils import read_bin_to_depth
-from multiview_hand_pose_cnn.dataset.data_utils import (depth_to_point_cloud, align_point_cloud, project_to_obb_planes,
-                                                        generate_heatmaps, local_contrast_normalization)
+from multiview_hand_pose_cnn.dataset.data_utils import (read_bin_to_depth, depth_to_point_cloud, align_point_cloud,
+                                                        project_to_obb_planes, generate_heatmaps,
+                                                        local_contrast_normalization)
+from multiview_hand_pose_cnn.dataset.errors import InvalidDataError
 
 
 class ToPointCloud:
@@ -47,40 +47,21 @@ class ProjectToOBBPlanes:
             -> (np.ndarray, np.ndarray):
         # Extract point cloud, joints, obb and vertex index from sample
         (point_cloud, joints, obb) = sample
-        projections, boundaries = project_to_obb_planes(point_cloud, obb[-1])
+        projections, boundaries = project_to_obb_planes(point_cloud, vertex=obb[-1], res=96)
 
         # Refine with morph operations and median filter
         def refine(projection: np.ndarray):
             # Open and apply median filter
             projection = cv2.morphologyEx(projection,
                                           cv2.MORPH_OPEN,
-                                          kernel=cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
-            projection = cv2.medianBlur(projection, ksize=3)
+                                          kernel=cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+            projection = cv2.medianBlur(projection, ksize=5)
 
             return projection
 
-        # Resize and pad each projection to the specified value
-        def resize_and_pad(projection: np.ndarray, size: int):
-            max_side = max(projection.shape)
-            side = projection.shape.index(max_side)
-            # Resize image s.t. the longer side is set to self.size
-            projection = imutils.resize(projection, height=size) if side == 0 \
-                else imutils.resize(projection, width=size)
-            # Compute padding on the shorter side
-            padding = size - projection.shape[1 - side]
-            padding1 = padding // 2
-            padding2 = padding1 if padding % 2 == 0 else padding1 + 1
-            if side == 0:  # pad width
-                projection = cv2.copyMakeBorder(projection, top=0, bottom=0, left=padding1, right=padding2,
-                                                borderType=cv2.BORDER_CONSTANT, value=1.)
-            else:  # pad height
-                projection = cv2.copyMakeBorder(projection, top=padding1, bottom=padding2, left=0, right=0,
-                                                borderType=cv2.BORDER_CONSTANT, value=1.)
-            return projection
-
-        # Refine, resize to 96x96, normalize and convert to NumPy's array
+        # Refine, normalize and convert list to NumPy's array
         projections = np.array(
-            [resize_and_pad(refine(p.astype('float32')), size=96) for p in projections], dtype='float64'
+            [refine(p.astype('float32')) for p in projections], dtype='float64'
         )
 
         # Project also joints coordinates and obtain heatmaps
@@ -167,23 +148,28 @@ class MSRAPreprocess:
         lengths = map(len, self.subjects)
         return sum(lengths)
 
-    def __getitem__(self, item) -> Tuple[np.ndarray, Dict[str, Tuple[float, float, float]]]:
+    def __getitem__(self, item: int) -> Tuple[np.ndarray, Union[Dict[str, Tuple[float, float, float]], np.ndarray]]:
         # Find index of nested list
         lengths = list(map(len, self.subjects))
         cur_sub = 0
+        cur_item = item
         while True:
-            div = item // lengths[cur_sub]
-            if div != 0:
+            if cur_item >= lengths[cur_sub]:
+                cur_item -= lengths[cur_sub]
                 cur_sub += 1
-                item -= lengths[cur_sub]
             else:
                 break
-        (bin_file, joints) = self.subjects[cur_sub][item]
+        (bin_file, joints) = self.subjects[cur_sub][cur_item]
         # Open and read the binary file to produce the actual depth image
         sample = (read_bin_to_depth(bin_file), joints)
         # Apply additional steps
-        for step in self.steps:
-            sample = step(sample)
+        try:
+            for step in self.steps:
+                sample = step(sample)
+        except InvalidDataError:
+            print(f'InvalidDataError: removed sample ({cur_sub}, {cur_item})')
+            self.subjects[cur_sub].pop(cur_item)  # get rid of invalid sample
+            return self[item]  # call __getitem__ recursively
         return sample
 
     def add_step(self, step: Union[ToPointCloud, AlignPointCloud, ProjectToOBBPlanes, LocalContrastNormalization]):
@@ -221,29 +207,19 @@ class MSRAPreprocess:
             Path(train_dir).mkdir(parents=True, exist_ok=True)
             Path(test_dir).mkdir(parents=True, exist_ok=True)
             # Reserve last subject for test
-            train_sub = [sample for sublist in self.subjects[:-1] for sample in sublist]
-            test_sub = self.subjects[-1]
-            # Iterate over training samples
-            for i, (bin_file, joints) in enumerate(tqdm(train_sub, leave=False)):
-                # Open and read the binary file to produce the actual depth image
-                sample = (read_bin_to_depth(bin_file), joints)
-                # Apply additional steps
-                for step in self.steps:
-                    sample = step(sample)
+            train_test_sep = sum(map(len, self.subjects[:-1]))
+            # Iterate over all samples
+            for i in tqdm(range(len(self)), leave=False):
+                # Take i-th sample
+                sample = self[i]
                 # Save in .npz
-                np.savez_compressed(os.path.join(train_dir, f'{i:06d}.npz'),
-                                    x=sample[0].astype('float32'),
-                                    y=sample[1].astype('float32'))
-            # Iterate over test samples
-            for i, (bin_file, joints) in enumerate(tqdm(test_sub, leave=False)):
-                # Open and read the binary file to produce the actual depth image
-                sample = (read_bin_to_depth(bin_file), joints)
-                # Apply additional steps
-                for step in self.steps:
-                    sample = step(sample)
-                # Save in .npz
-                np.savez_compressed(os.path.join(test_dir, f'{i:06d}.npz'),
-                                    x=sample[0].astype('float32'),
-                                    y=sample[1].astype('float32'))
+                if i < train_test_sep:  # train set
+                    np.savez_compressed(os.path.join(train_dir, f'{i:06d}.npz'),
+                                        x=sample[0].astype('float32'),
+                                        y=sample[1].astype('float32'))
+                else:  # test set
+                    np.savez_compressed(os.path.join(test_dir, f'{i:06d}.npz'),
+                                        x=sample[0].astype('float32'),
+                                        y=sample[1].astype('float32'))
         else:
             print('You must add all the preprocessing step before saving data to disk.')

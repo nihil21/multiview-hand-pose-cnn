@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 from sklearn.decomposition import PCA
 from typing import Union, Dict, Tuple, Optional, List, Callable
+from multiview_hand_pose_cnn.dataset.errors import InvalidDataError
 
 
 def read_bin_to_depth(filename: str) -> np.ndarray:
@@ -103,12 +104,14 @@ def align_point_cloud(point_cloud: np.ndarray, joints: Optional[Dict[str, Tuple[
     return point_cloud, obb, jc
 
 
-def project_to_obb_planes(point_cloud: np.ndarray, vertex: np.ndarray) -> (List[np.ndarray], List[np.ndarray]):
+def project_to_obb_planes(point_cloud: np.ndarray, vertex: np.ndarray, res: int) \
+        -> (List[np.ndarray], List[np.ndarray]):
     """Function that, given an aligned point cloud and the coordinates of one OBB vertex, returns the three
     projections of the point cloud on the three xy, yz, zx planes sharing the vertex.
 
         :param point_cloud: NumPy's array representing a point cloud;
-        :param vertex: 3D coordinates of the OBB vertex common to the three projection planes.
+        :param vertex: 3D coordinates of the OBB vertex common to the three projection planes;
+        :param res: the resolution of the final projection
 
         :returns the three projections of the point cloud;
         :returns the projections' boundaries, useful to generate heatmaps."""
@@ -130,18 +133,33 @@ def project_to_obb_planes(point_cloud: np.ndarray, vertex: np.ndarray) -> (List[
         # Compute distance from plane and normalize
         d_arr = np.abs(z_arr - plane)
         norm_factor = d_arr.max() - d_arr.min()
-        d_arr = (d_arr - d_arr.min()) / norm_factor if norm_factor != 0 else d_arr - d_arr.min()
+        if norm_factor == 0:
+            raise InvalidDataError()
+        d_arr = (d_arr - d_arr.min()) / norm_factor
 
-        # Create linear spaces for x and y
-        x_space = np.arange(start=x_arr.min(), stop=x_arr.max() + 2, step=2)  # resolution of 2 mm
-        y_space = np.arange(start=y_arr.min(), stop=y_arr.max() + 2, step=2)  # resolution of 2 mm
+        # Create linear spaces for x and y accounting for padding and aspect ratio
+        x_range = x_arr.max() - x_arr.min()
+        y_range = y_arr.max() - y_arr.min()
+        if x_range > y_range:
+            length = round(res * y_range / x_range)
+            x_space = np.linspace(x_arr.min(), x_arr.max(), res)
+            y_space = np.linspace(y_arr.min(), y_arr.max(), length)
+            i_pad = 0
+            j_pad = (res - length) // 2
+        else:
+            length = round(res * x_range / y_range)
+            x_space = np.linspace(x_arr.min(), x_arr.max(), length)
+            y_space = np.linspace(y_arr.min(), y_arr.max(), res)
+            i_pad = (res - length) // 2
+            j_pad = 0
         # Create projection pixel grid
-        proj_grid = np.ones((len(x_space), len(y_space)))
+        proj_grid = np.ones((res, res))
+
         # For each point in the cloud, find the best pixel coordinates
         for x, y, d in zip(x_arr, y_arr, d_arr):
             i = find_nearest(x, x_space)
             j = find_nearest(y, y_space)
-            proj_grid[i, j] = min(d, proj_grid[i, j])
+            proj_grid[i + i_pad, j + j_pad] = min(d, proj_grid[i, j])
         # Normalize
         proj_grid = cv2.normalize(proj_grid, dst=None, alpha=0., beta=1., norm_type=cv2.NORM_MINMAX)
         proj_grids.append(proj_grid)
